@@ -1,7 +1,7 @@
 # Project Report — NIFTY 500 Multi-Strategy Algo Trading System
 
-**Date:** 2026-08-05
-**Scope:** `data_collection.ipynb`, `backtesting.ipynb`, `portfolio_optimization.ipynb`, `news.ipynb`
+**Date:** 2026-08-16
+**Scope:** `data_collection.ipynb`, `backtesting.ipynb`
 
 ## 1. Objective
 
@@ -10,11 +10,12 @@ Build a systematic equity strategy over the NIFTY 500 universe that combines thr
 ## 2. Data
 
 - **Universe**: NIFTY 500 constituents as of 18 March 2026 (`nifty_500_list.csv`, 500 symbols), with `-`/`_` symbol mismatches between the NSE list and TradingView reconciled.
-- **Prices**: ~5,040 daily bars per stock (≈20 years) downloaded via `tvDatafeed` from the NSE exchange, stored per-symbol as Parquet and merged into a single long-format master file (`symbol`, `date`, OHLCV).
+- **Prices**: daily bars per stock downloaded via `tvDatafeed` from the NSE exchange, stored per-symbol as Parquet and merged into a single long-format master file (`symbol`, `date`, OHLCV).
 - **Benchmark/regime series**: NIFTY 50 index daily OHLCV, downloaded the same way, used both as a benchmark and as the input to the market-regime filters.
 - **Analysis window**: data is truncated to start 2011-01-01 (one year of lookback buffer before the training period begins), with:
   - Train: 2012-01-01 → 2020-01-01
   - Test: 2020-01-01 → 2025-11-26
+  - Production: 2025-11-26 → most recent available data
 
 ## 3. Feature Engineering
 
@@ -34,10 +35,8 @@ Build a systematic equity strategy over the NIFTY 500 universe that combines thr
 | Range Expansion | `(close - open) / ATR` — breakout intensity |
 | Volume Z-score (20-day) | Volume anomaly detection |
 | Trend-Noise Ratio | `ATR14 / |EMA50 - EMA200|` — trend clarity vs. chop |
-| Gap | Overnight gap magnitude |
+| Gap | Overnight gap magnitude (computed but currently unused — see §8) |
 | Breadth | % of universe trading above its 50-day MA, computed daily across the filtered universe |
-
-A second, vectorized version of most of these (`compute_features`, using Polars lazy expressions) also exists in the notebook; it is not currently called by the strategy pipeline and appears to be a parallel/experimental implementation.
 
 ## 4. Universe Filtering
 
@@ -78,40 +77,44 @@ Every 45 days, capital is split across Low/Medium/High proportional to each leg'
 
 ## 6. Backtest Mechanics
 
-For each rebalance window, per selected stock: a `backtesting.py` `Backtest` is run over the lookback + trade window with `exclusive_orders=True`, capital split evenly across the stocks selected in that window. The window's portfolio return is the equal-weighted average of the per-stock returns, compounded into a running cash balance. If no stocks survive the universe filter, or the regime filter blocks all directions, or all per-stock backtests fail, the window carries cash forward unchanged (visible in the run logs as frequent "Carrying cash forward" messages, especially through 2020–2025 where the High and Medium regime filters are frequently unsatisfied).
+For each rebalance window, per selected stock: a `backtesting.py` `Backtest` is run over the lookback + trade window with `exclusive_orders=True`, capital split evenly across the stocks selected in that window. The window's portfolio return is the equal-weighted average of the per-stock returns, compounded into a running cash balance. If no stocks survive the universe filter, or the regime filter blocks all directions, or all per-stock backtests fail, the window carries cash forward unchanged.
 
-## 7. Results (Training Set, 2012–2020)
+## 7. Results
 
-These are the only results that executed successfully end-to-end in the current notebook:
+`backtesting.ipynb` now runs end-to-end — all 64 code cells execute in order with no errors — producing results across all three periods. Initial capital: ₹1,00,00,000 per leg (₹3,00,00,000 for the Master run).
 
-| Strategy | CAGR | Max Drawdown |
-|---|---|---|
-| Master (blended) | 26.94% | -3.8% |
-| Low | 1.78% | -7.7% |
-| Medium | 76.06% | -1.2% |
-| High | 36.7% | -9.9% |
+| Period | Strategy | CAGR (%) | Max Drawdown (%) | Avg Sharpe |
+|---|---|---|---|---|
+| Train (2012–2020) | Master | 29.94 | -2.78 | 12.304 |
+| Train | High | 33.75 | -11.22 | 4.507 |
+| Train | Medium | 74.63 | -1.17 | 23.172 |
+| Train | Low | 5.13 | -7.40 | 5.681 |
+| Test (2020–2025) | Master | 64.96 | -15.67 | 10.554 |
+| Test | High | 94.35 | -13.60 | 9.417 |
+| Test | Medium | 55.28 | -11.44 | 10.235 |
+| Test | Low | -3.23 | -34.71 | 1.998 |
+| Production (2025–present) | Master | -3.27 | -1.22 | -11.225 |
+| Production | High | 0.00 | 0.00 | n/a |
+| Production | Medium | 0.00 | 0.00 | 0.000 |
+| Production | Low | -0.14 | -1.76 | n/a |
 
-Initial capital: ₹3,00,00,000 for the Master run (₹1,00,00,000 per leg, matching the individual leg runs).
+**Read with caution:**
 
-**Read with caution:** these are in-sample (training-period) numbers only — no out-of-sample validation currently completes (see §8). The Medium strategy's training CAGR (76%) alongside a very shallow drawdown (-1.2%) is a strong outlier relative to the other two legs and warrants scrutiny (position sizing, look-ahead risk in the 240-day-lookback composite score, and the 45-day window length are the first places to check) before being trusted.
+- The Medium strategy's Train CAGR (75%) alongside a very shallow drawdown (-1.2%) is a strong outlier and warrants scrutiny — position sizing, look-ahead risk in the 240-day-lookback composite score, and the 45-day window length are the first places to check before trusting it. It stays strong but more plausible in Test (55%, -11.4% DD), which is at least reassuring.
+- The Low strategy degrades sharply out-of-sample: 5% CAGR / -7.4% DD in Train vs. -3.2% CAGR / **-34.7% DD** in Test — the largest drawdown of any leg in either period. This is the strategy most likely to be overfit to Train-period conditions.
+- The Production window (Nov 2025 → present) is short (~8.5 months) and both High and Medium show flat 0.0% CAGR — the regime filter is apparently not greenlighting any trades for those two legs in this window, not a computation error. Production-period conclusions should be treated as low-confidence until the window is longer.
 
 ## 8. Known Issues / Limitations
 
-These are concrete defects observed while reading the notebook, not speculative:
+Previous revisions of this report described the strategy classes as missing, the test-set pipeline as broken by a `NameError`, and several train/test variable mix-ups. Those have all been fixed — `Low_Strategy`, `Medium_Strategy`, and `High_Strategy` are fully defined and imported correctly, the test-period cells reference the correct variables, and the notebook is self-contained and runs standalone in a fresh kernel. Remaining items:
 
-1. **The strategy classes referenced at runtime are not defined in this notebook.** `backtest_low_strategy`, `backtest_medium_strategy`, and `backtest_high_strategy` all instantiate `Backtest(df_bt_run, Low_Strategy, ...)` / `Medium_Strategy` / `High_Strategy` and call `bt.run(direction=direction)`, but none of `Backtest` (the `backtesting.py` class), `Low_Strategy`, `Medium_Strategy`, or `High_Strategy` are imported or defined anywhere in `backtesting.ipynb`. Likewise `plt` (matplotlib) and `traceback` are used without being imported. The notebook only runs because these names exist in the live kernel's namespace from a prior/external session — the file itself is not self-contained. (`get_low_signals()`, `get_medium_signals()`, `get_high_signals()` look like earlier, non-class-based drafts of the same logic and are not called by the pipeline; `get_low_signals` also contains an invalid expression, `df['ATR' - 1]`, and `get_medium_signals` references an undefined `kc`.)
-2. **Test-set evaluation is broken.** The cell converting the Low strategy's test-period equity curve does `test_low_results = pd.DataFrame(test_low_equity, ...)`, but the preceding cell assigned the raw result to `test_low_results` (not `test_low_equity`) — a variable-name mismatch that raises `NameError` and prevents the Low strategy's test results, and the final comparison table (`yearly_metrics_df`), from being produced.
-3. **Copy/paste leftovers in the "Testing" section.** The CAGR/max-drawdown print cells under Master, Low, Medium, and High in the *Testing* section still read from `train_low_results` in their source text rather than the corresponding test variable, so any numbers they print are not reliable test-period figures.
-4. **`Gap` indicator has an operator-precedence bug**: `open - close.shift(1).abs() / close.shift(1)` evaluates as `open - (|close.shift(1)| / close.shift(1))` rather than the presumably intended `(open - close.shift(1)).abs() / close.shift(1)`.
-5. **`stock_selection.ipynb` is empty** — planned but not started.
-6. **No dependency manifest** (`requirements.txt` / `pyproject.toml`) is checked in; see `README.md` for the inferred package list.
-7. **Regime filters are frequently binding**, especially for the High strategy (trend + volatility + breadth must all agree) — the test-period run logs show long stretches of "no trade" windows through 2020–2025, which will suppress realized returns/activity regardless of the bugs above.
+1. **`Gap` formula has an operator-precedence bug**: `open - close.shift(1).abs() / close.shift(1)` evaluates as `open - (|close.shift(1)| / close.shift(1))` rather than the presumably intended `(open - close.shift(1)).abs() / close.shift(1)`. Low severity — the `Gap` column is computed in `compute_indicators()` but not read by any strategy's scoring or filter logic, so it doesn't affect the results in §7. Should be fixed before `Gap` is wired into anything.
+2. **Regime filters are frequently binding**, especially for the High strategy (trend + volatility + breadth must all agree) — this suppresses realized trades/returns in some windows regardless of scoring quality, most visibly in the short Production window (see §7).
+3. **No automated tests** — correctness currently relies on manual inspection of notebook output rather than a repeatable check.
 
 ## 9. Recommended Next Steps
 
-1. Add the missing `Strategy` subclass definitions (or import them from wherever they currently live) so `backtesting.ipynb` is runnable standalone, top to bottom, in a fresh kernel.
-2. Fix the `test_low_equity`/`test_low_results` naming bug and the four train/test variable mix-ups in the Testing section, then re-run to get real out-of-sample numbers.
-3. Investigate the Medium strategy's outsized training CAGR for look-ahead bias or sizing errors before trusting it.
-4. Fix the `Gap` formula precedence bug, and decide whether to keep or remove the vestigial `get_*_signals()` functions and the unused Polars `compute_features()` path.
-5. Pin dependencies in a `requirements.txt` (`pandas`, `polars`, `numpy`, `pandas_ta`, `backtesting`, `matplotlib`, `tvDatafeed`, plus `yfinance`/`seaborn` for `portfolio_optimization.ipynb` and `feedparser`/`transformers` for `news.ipynb`).
-6. Decide the role of `news.ipynb` (FinBERT headline sentiment) and `portfolio_optimization.ipynb` (variance-covariance analysis) relative to the core pipeline — currently both are disconnected prototypes.
+1. Investigate the Medium strategy's outsized Train CAGR (look-ahead bias, sizing, or window-length sensitivity) and the Low strategy's out-of-sample drawdown blowout (34.7% in Test vs. 7.4% in Train) before trusting either for live use.
+2. Fix the `Gap` formula precedence bug, and either wire `Gap` into a strategy's scoring/filter or remove it if it's not needed.
+3. Let the Production window accumulate more history before drawing conclusions from it — 8.5 months isn't enough to distinguish "regime filter correctly sitting out" from "regime filter miscalibrated."
+4. Add basic automated checks (e.g. a smoke test that the notebook executes top-to-bottom without error, or unit tests for the indicator functions) so pipeline regressions are caught before they reach a full backtest run.

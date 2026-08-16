@@ -2,23 +2,21 @@
 
 A systematic, multi-strategy equity trading research project built around the NIFTY 500 universe. It downloads daily price history, engineers a set of technical indicators, scores and selects stocks under three distinct strategy styles (Low / Medium / High), filters trades against a market-regime signal, and backtests a capital-weighted "Master" allocation across all three.
 
-> **Status:** work in progress. The most recent commit is titled *"Needs fine tuning"* — the training-set backtest runs end-to-end, but the test-set evaluation pipeline currently errors out (see [Known Issues](#known-issues) and `REPORT.md`).
+> **Status:** `backtesting.ipynb` runs end-to-end, top to bottom, with no errors. Train (2012–2020), Test (2020–2025) and Production (2025–present) results all compute successfully. See [Known Issues](#known-issues) and `REPORT.md` for remaining caveats and result quality notes.
 
 ## Repository Structure
 
 | File | Purpose |
 |---|---|
 | `data_collection.ipynb` | Downloads ~20 years of daily OHLCV data for all NIFTY 500 constituents and the NIFTY 50 index from TradingView (via `tvDatafeed`), and merges per-stock files into master Parquet files. |
-| `backtesting.ipynb` | The core notebook: technical indicators, the three strategies (Low/Medium/High), universe filtering, market-regime filters, the Master allocator, and train/test backtests with performance metrics. |
-| `portfolio_optimization.ipynb` | A small, standalone exploration of a fixed two-stock portfolio (Reliance, HDFC Bank) — pulls prices via `yfinance` and computes a variance-covariance matrix. |
-| `news.ipynb` | Standalone prototype for pulling financial news (Moneycontrol, ET Markets, NSE, Google News RSS) and scoring headline sentiment with FinBERT. Not wired into the backtest pipeline. |
-| `stock_selection.ipynb` | Empty placeholder — not yet started. |
+| `backtesting.ipynb` | The core notebook: technical indicators, the three strategies (Low/Medium/High), universe filtering, market-regime filters, the Master allocator, and Train/Test/Production backtests with performance metrics. |
 | `nifty_500_list.csv` | NIFTY 500 index constituents (company name, industry, symbol, ISIN), downloaded from the NSE website on 18 March 2026. |
-| `data/Algo Trading Data.zip` | A packaged snapshot of the raw/master Parquet price data (untracked, large — see [Data](#data)). |
+| `requirements.txt` | Pinned Python dependencies for both notebooks. |
+| `data/` | Local price data (gitignored, not committed — see [Data](#data)). |
 
 ## Data
 
-Price data is sourced from TradingView (`tvDatafeed`) for `data_collection.ipynb`, and separately from Yahoo Finance (`yfinance`) for the standalone `portfolio_optimization.ipynb`. Expected local layout (created by `data_collection.ipynb`, not committed to git):
+Price data is sourced from TradingView (`tvDatafeed`) via `data_collection.ipynb`. Expected local layout:
 
 ```
 data/
@@ -26,10 +24,10 @@ data/
 │   ├── nifty_500_stocks.parquet   # all 500 stocks, long format (symbol, date, OHLCV)
 │   └── nifty_50_index.parquet     # NIFTY 50 index OHLCV, used for regime filtering
 └── nifty_500_stocks/
-    └── <SYMBOL>.parquet           # one file per stock, ~5040 daily bars each
+    └── <SYMBOL>.parquet           # one file per stock
 ```
 
-`data/Algo Trading Data.zip` contains a pre-downloaded snapshot of this layout — unzip it into `data/` to skip re-running the TradingView download.
+`data/` is gitignored — this layout is created locally by running `data_collection.ipynb`. A pre-downloaded snapshot may also be shared out-of-band (e.g. a zip of the `data/` folder) to skip re-running the TradingView download.
 
 ## Strategy Overview
 
@@ -47,37 +45,25 @@ See `REPORT.md` for the full methodology, indicator definitions, and current res
 
 ## Setup
 
-No `requirements.txt` is currently checked in. Based on the imports used across the notebooks, you'll need:
+```
+pip install -r requirements.txt
+```
+
+`tvDatafeed` (needed only for `data_collection.ipynb`) isn't on PyPI under a stable name — install it separately:
 
 ```
-pandas
-polars
-numpy
-pandas_ta
-backtesting          # backtesting.py — used for per-stock trade simulation
-matplotlib
-seaborn              # portfolio_optimization.ipynb only
-tvDatafeed           # pip install --upgrade git+https://github.com/rongardF/tvdatafeed.git
-yfinance             # portfolio_optimization.ipynb only
-feedparser           # news.ipynb only
-transformers         # news.ipynb only (FinBERT sentiment model)
+pip install --upgrade git+https://github.com/rongardF/tvdatafeed.git
 ```
 
 ## Running
 
-1. **Collect data** — run `data_collection.ipynb` top to bottom (or unzip `data/Algo Trading Data.zip` into `data/` to skip this). Downloads are skipped automatically if the target Parquet files already exist.
-2. **Run the backtest** — run `backtesting.ipynb` top to bottom. It loads the merged Parquet files, computes indicators, and runs the Low/Medium/High/Master strategies over the training window (2012–2020).
-3. `portfolio_optimization.ipynb` and `news.ipynb` are standalone and can be run independently of the above.
+1. **Collect data** — run `data_collection.ipynb` top to bottom. Downloads are skipped automatically if the target Parquet files already exist.
+2. **Run the backtest** — run `backtesting.ipynb` top to bottom. It loads the merged Parquet files, computes indicators, and runs the Low/Medium/High/Master strategies over the Train (2012–2020), Test (2020–2025), and Production (2025–present) windows.
 
 ## Known Issues
 
-The pipeline is mid-refactor. Concrete gaps as of the last commit:
+- **`Gap` indicator has an unused operator-precedence bug**: `open - close.shift(1).abs() / close.shift(1)` evaluates as `open - (|close.shift(1)| / close.shift(1))` rather than the presumably intended `(open - close.shift(1)).abs() / close.shift(1)`. The `Gap` column is computed but not currently read by any strategy's scoring or filter logic, so this doesn't affect current results — but it should be fixed before `Gap` is used for anything.
+- **Regime filters are frequently binding**, especially for the High strategy (trend + volatility + breadth must all agree). This suppresses trading activity in some windows, most visibly in the short Production window (Nov 2025–present) where the High and Medium legs show no realized trades.
+- No automated tests — correctness relies on manual inspection of notebook output.
 
-- **Missing definitions in `backtesting.ipynb`**: the notebook calls `Backtest(...)`, `Low_Strategy`, `Medium_Strategy`, `High_Strategy`, `plt`, and `traceback`, none of which are imported or defined in the notebook as saved. The actual per-stock entry/exit logic (the `Strategy` subclasses) is not present in this file.
-- **Test-set evaluation errors out**: cell defining `test_low_results` references an undefined `test_low_equity` (`NameError`), which cascades into the final metrics comparison table.
-- Several "Testing" section CAGR/drawdown cells still reference the **training** equity curve variable (`train_low_results`) instead of the corresponding test one — a copy/paste leftover.
-- `get_low_signals()` contains an invalid expression (`df['ATR' - 1]`) and appears to be superseded by the (missing) `Low_Strategy` class; `get_medium_signals()` references an undefined `kc` variable. Both look like earlier drafts not currently wired into the pipeline.
-- `stock_selection.ipynb` is an empty file.
-- No `requirements.txt` / environment file is checked in.
-
-Full detail and the training-set results that *did* run successfully are in `REPORT.md`.
+Full detail, the current results, and severity notes are in `REPORT.md`.
